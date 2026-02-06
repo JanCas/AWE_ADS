@@ -79,11 +79,30 @@ class SorbentProperties(Module):
     particle_diffusivity: Float
     particle_density: Float
     isotherm: Module
+    
+    k_sorb_C_file: Array
+    k_sorb_from_file: Array
+
+    def __init__(self, particle_radius, particle_diffusivity, particle_density, isotherm, k_sorb_file, env):
+        self.particle_radius = particle_radius
+        self.particle_diffusivity = particle_diffusivity
+        self.particle_density = particle_density
+        self.isotherm = isotherm
+
+        path = Path(k_sorb_file)
+        data = np.loadtxt(path)
+
+        self.k_sorb_C_file = rh_to_c(data[:,0], env.T)
+        self.k_sorb_from_file = data[:, 1] * 1e-4
 
     @property
     def k_sorb(self) -> Float:
         return 15 * self.particle_diffusivity / (self.particle_radius**2)
 
+    def k_sorb_C(self, concentration) -> Float:
+        return jnp.interp(concentration, self.k_sorb_C_file, self.k_sorb_from_file)
+
     def __call__(self, concentration):
         return self.isotherm(concentration)
+
 

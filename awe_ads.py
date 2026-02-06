@@ -7,6 +7,7 @@ from matplotlib.animation import FuncAnimation
 from utils.spatial_discretization import SpatialDiscretisation
 from utils.properties import BedProperties, SorbentProperties, EnvironmentalConditions, Isotherm, rh_to_c
 import JansPlottingStuff as JPS
+import numpy as np
 
 jax.config.update("jax_enable_x64", True)
 
@@ -34,7 +35,7 @@ def bed_ode(t, y: BedState, args):
 
 
     # LDF for sorption
-    dndt = .8e-4 * (sorbent.isotherm(C_s.vals) - n.vals)
+    dndt = sorbent.k_sorb_C(C_s.vals) * (sorbent.isotherm(C_s.vals) - n.vals)
 
     # Diffusion in the y direction
     C_s_prev = jnp.roll(C_s.vals, shift=-1)
@@ -73,7 +74,7 @@ def run_wrapper(bed_props: BedProperties, env: EnvironmentalConditions, sorbent:
 
     # temporal discretization
     t0 = 0
-    tf = int(10 * 3600)
+    tf = int(7 * 3600)
     # dt = 1e-3
 
     # stepsize_controller = ConstantStepSize()
@@ -81,7 +82,7 @@ def run_wrapper(bed_props: BedProperties, env: EnvironmentalConditions, sorbent:
 
     # Saveat setup
     # saveat = SaveAt(t0=True, steps=True)
-    saveat = SaveAt(ts=jnp.linspace(t0, tf, 500))  # only save 500 points
+    saveat = SaveAt(ts=jnp.linspace(0, tf, 10000))  # only save 500 points
 
     solution = diffeqsolve(
         terms = ODETerm(bed_ode),
@@ -101,6 +102,7 @@ def run_wrapper(bed_props: BedProperties, env: EnvironmentalConditions, sorbent:
         max_steps=int(1e7)
     )
 
+
     return solution
 
 
@@ -118,6 +120,8 @@ def plot_total_n(solution, bed_props: BedProperties, sorbent: SorbentProperties)
 
     # Total moles = sum(n × mass) for each timestep
     total_moles = jnp.sum(n_vals * sorbent_mass_per_element, axis=1)
+
+    np.savetxt("test.txt", np.column_stack((ts, total_moles)))
 
     plt.figure()
     plt.plot(ts / 3600, total_moles)
@@ -156,35 +160,9 @@ def plot_n_profiles(solution, bed_props: BedProperties):
     plt.show()
 
 
-def animate_n(solution, bed_props: BedProperties, n_frames=200):
-    ts = solution.ts
-    n_vals = solution.ys.n.vals  # shape: (n_timesteps, n_spatial_points)
-    z = jnp.linspace(0, bed_props.sorbent_bed_height * 1000, n_vals.shape[1])  # height in mm
-
-    # Subsample timesteps for smoother animation
-    total_steps = len(ts)
-    frame_indices = jnp.linspace(0, total_steps - 1, n_frames).astype(int)
-
-    fig, ax = plt.subplots()
-    line, = ax.plot(z, n_vals[0, :])
-    ax.set_xlim(0, bed_props.sorbent_bed_height * 1000)
-    ax.set_ylim(0, jnp.max(n_vals) * 1.1)
-    ax.set_xlabel("Height [mm]")
-    ax.set_ylabel("Sorbent loading (n)")
-    time_text = ax.set_title(f"t = {ts[0]/3600:.2f} h")
-
-    def update(frame):
-        idx = frame_indices[frame]
-        line.set_ydata(n_vals[idx, :])
-        time_text.set_text(f"t = {ts[idx]/3600:.2f} h")
-        return line, time_text
-
-    anim = FuncAnimation(fig, update, frames=n_frames, interval=50, blit=True)
-    plt.show()
-    return anim
-
 
 if __name__ == "__main__":
+    # Custom plotting style library (Designed by me)
     JPS.apply()
 
     bed_prop = BedProperties(
@@ -197,7 +175,7 @@ if __name__ == "__main__":
     )
 
     env = EnvironmentalConditions(
-        RH=.5,
+        RH=.65,
         T=25
     )
 
@@ -207,13 +185,12 @@ if __name__ == "__main__":
         particle_radius=1e-6,
         particle_density=1100,
         particle_diffusivity=1e-15,
-        isotherm=isotherm
+        isotherm=isotherm,
+        env=env,
+        k_sorb_file="utils/D_mu_RH.txt"
     )
 
     solution=run_wrapper(bed_props=bed_prop, env=env, sorbent=sorbent)
 
-    print()
-
     plot_total_n(solution, bed_prop, sorbent)
     plot_n_profiles(solution, bed_prop)
-    # animate_n(solution, bed_prop)
