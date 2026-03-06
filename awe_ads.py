@@ -1,3 +1,4 @@
+import pandas as pd
 from diffrax import diffeqsolve, ODETerm, SaveAt, ConstantStepSize, Euler, PIDController, Tsit5, Kvaerno5, TqdmProgressMeter
 import jax.numpy as jnp
 import jax
@@ -122,10 +123,16 @@ def plot_total_n(solution, bed_props: BedProperties, sorbent: SorbentProperties)
     total_moles = jnp.sum(n_vals * sorbent_mass_per_element, axis=1)
 
     np.savetxt("test.txt", np.column_stack((ts, total_moles)))
+    
+    x = pd.read_csv("exp_ads_data.csv")
+    x["mol_ads"] = x["ads_mass(g)"] / 210 / .018 / 1000
+
 
     plt.figure()
+    plt.plot(x["Time(s)"]/3600, x["mol_ads"], label="ads") 
     plt.plot(ts / 3600, total_moles)
     plt.xlabel("Time [h]")
+    plt.legend()
     plt.ylabel("Total moles captured")
     plt.title("Total Moles Captured vs Time")
     plt.grid(True)
