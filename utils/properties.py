@@ -93,7 +93,8 @@ class SorbentProperties(Module):
         data = np.loadtxt(path)
 
         self.k_sorb_C_file = rh_to_c(data[:,0], env.T)
-        self.k_sorb_from_file = data[:, 1] * 1e-4
+        self.k_sorb_from_file = data[:, 1] * 1e-4 * 2.5
+        print(self.k_sorb_from_file)
 
     @property
     def k_sorb(self) -> Float:
