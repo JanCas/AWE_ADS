@@ -4,11 +4,11 @@ import jax.numpy as jnp
 import jax
 from equinox import Module
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
 from utils.spatial_discretization import SpatialDiscretisation
 from utils.properties import BedProperties, SorbentProperties, EnvironmentalConditions, Isotherm, rh_to_c, psat_water, IDEAL_GAS_CONST
 import JansPlottingStuff as JPS
 import numpy as np
+from pathlib import Path
 
 jax.config.update("jax_enable_x64", True)
 
@@ -32,12 +32,12 @@ def bed_ode(t, y: BedState, args):
     porosity = bed_props.porosity
 
     # Sorbent Bed Diffusivity
-    D_vs = bed_props.bed_diffusivity 
+    D_vs = bed_props.bed_diffusivity
 
 
     # LDF for sorption
-    #dndt = sorbent.k_sorb_C(C_s.vals) * (sorbent.isotherm(C_s.vals) - n.vals)
-    dndt = k_sorb * (sorbent.isotherm(C_s.vals) - n.vals)
+    dndt = sorbent.k_sorb_C(C_s.vals) * (sorbent.isotherm(C_s.vals) - n.vals)
+    #dndt = k_sorb * (sorbent.isotherm(C_s.vals) - n.vals)
 
     # Diffusion in the z direction
     C_lower = jnp.roll(C_s.vals, shift=1)   # C[i-1]
@@ -50,7 +50,7 @@ def bed_ode(t, y: BedState, args):
     laplacian = laplacian.at[0].set((C_upper[0] - C_s.vals[0]) / C_s.δx**2)
     laplacian = laplacian.at[-1].set(0)  # Will be overridden by dcdt[-1] = 0 anyway
 
-    dcdt =  D_vs*laplacian - (1-porosity)/porosity * rho_s * dndt 
+    dcdt =  D_vs*laplacian - (1-porosity)/porosity * rho_s * dndt
     dcdt = dcdt.at[-1].set(0)
 
     return BedState(
@@ -58,7 +58,7 @@ def bed_ode(t, y: BedState, args):
         n=SpatialDiscretisation(n.x0, n.x_final, dndt)
     )
 
-def run_wrapper(bed_props: BedProperties, env: EnvironmentalConditions, sorbent: SorbentProperties):
+def run_wrapper(bed_props: BedProperties, env: EnvironmentalConditions, sorbent: SorbentProperties, final_time: float):
 
     #Discretization
     x0 = 0
@@ -66,7 +66,7 @@ def run_wrapper(bed_props: BedProperties, env: EnvironmentalConditions, sorbent:
     n = 25
 
     #initial conditions
-    C_s_vals = jnp.zeros(n) 
+    C_s_vals = jnp.zeros(n)
     C_s_vals  = C_s_vals.at[-1].set(env.C_amb)
 
     bed_state = BedState(
@@ -76,113 +76,74 @@ def run_wrapper(bed_props: BedProperties, env: EnvironmentalConditions, sorbent:
 
     # temporal discretization
     t0 = 0
-    tf = int(7 * 3600)
-    # dt = 1e-3
+    tf = final_time
 
-    # stepsize_controller = ConstantStepSize()
     stepsize_controller = PIDController(rtol=1e-5, atol=1e-7)
 
-    # Saveat setup
-    # saveat = SaveAt(t0=True, steps=True)
-    saveat = SaveAt(ts=jnp.linspace(0, tf, 10000))  # only save 500 points
+    saveat = SaveAt(ts=jnp.linspace(0, tf, 10000))
 
     solution = diffeqsolve(
         terms = ODETerm(bed_ode),
-        # solver = Euler(),
-        # solver = Tsit5(),
-        solver = Kvaerno5(),  # implicit solver for stiff diffusion
+        solver = Kvaerno5(),
         stepsize_controller=stepsize_controller,
         t0=t0,
         t1=tf,
-        # dt0=dt,
-        dt0=1e-3,  # initial guess, will adapt
+        dt0=1e-3,
         y0 = bed_state,
         args = (bed_props, sorbent, env),
         saveat=saveat,
         progress_meter=TqdmProgressMeter(),
-        # max_steps=int(tf/dt)+20
         max_steps=int(1e7)
     )
-
 
     return solution
 
 
-def plot_total_n(solution, bed_props: BedProperties, sorbent: SorbentProperties):
+def read_experiments(folder="exp_data/cleaned"):
+    folder = Path(folder)
+    files = sorted(folder.glob("*_cleaned.csv"))
+    experiments = []
+    for i, f in enumerate(files):
+        if i == 1:  # skip 2nd experiment
+            continue
+        df = pd.read_csv(f)
+        df["mol_ads"] = df["Ads Weight"] / 420 / 18.01528
+        experiments.append(df)
+    return experiments
+
+
+def plot_model_vs_experiment(solution, experiments, bed_props: BedProperties, sorbent: SorbentProperties):
     ts = solution.ts
     n_vals = solution.ys.n.vals  # shape: (n_timesteps, n_spatial_points)
 
-    # Calculate volume element for each spatial point (discretization is over height)
+    # Calculate total moles from model
     n_points = n_vals.shape[1]
     dz = bed_props.sorbent_bed_height / (n_points - 1)
     dV = bed_props.sorbent_bed_length * bed_props.sorbent_bed_width * dz
-
-    # Mass of sorbent per element = volume × (1-porosity) × particle_density
     sorbent_mass_per_element = dV * (1 - bed_props.porosity) * sorbent.particle_density
-
-    # Total moles = sum(n × mass) for each timestep
     total_moles = jnp.sum(n_vals * sorbent_mass_per_element, axis=1)
-
-    np.savetxt("test.txt", np.column_stack((ts, total_moles)))
-    
-    x = pd.read_csv("exp_ads_data.csv")
-    x["mol_ads"] = x["ads_mass(g)"] / 420 / 18.01528
-
-
-    # Interpolate model onto experimental time grid to compute error
-    model_interp = np.interp(x["Time(s)"].values, np.array(ts), np.array(total_moles))
-    error = model_interp - x["mol_ads"].values
 
     fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True)
 
-    ax1.plot(x["Time(s)"]/3600, x["mol_ads"], color='r', label="exp")
-    ax1.plot(ts / 3600, total_moles, label="model")
-    ax1.set_ylabel("Total moles captured")
-    ax1.set_title("Total Moles Captured vs Time")
+    # Plot individual experiments and their pct error vs model
+    for i, exp in enumerate(experiments):
+        t_exp = exp["ElapsedSeconds"].values
+        mol_exp = exp["mol_ads"].values
+        ax1.plot(t_exp / 3600, mol_exp, label=f"Exp {i+1}")
+
+        model_interp = np.interp(t_exp, np.array(ts), np.array(total_moles))
+        pct_error = np.where(mol_exp != 0, (model_interp - mol_exp) / mol_exp * 100, 0)
+        ax2.plot(t_exp / 3600, pct_error, label=f"Exp {i+1}")
+
+    # Plot model
+    ax1.plot(np.array(ts) / 3600, np.array(total_moles), label="Model")
+    ax1.set_ylabel("Ads Moles")
+    ax1.set_title("Model vs Experiment")
     ax1.legend()
-    ax1.grid(True)
 
-    ax2.plot(x["Time(s)"]/3600, error, color='k')
     ax2.set_xlabel("Time [h]")
-    ax2.set_ylabel("Error (model - exp)")
-    ax2.axhline(0, color='grey', linestyle='--', linewidth=0.5)
-    ax2.grid(True)
-
-    plt.tight_layout()
-    plt.show()
-
-
-def plot_n_profiles(solution, bed_props: BedProperties, env: EnvironmentalConditions):
-    ts = solution.ts
-    n_vals = solution.ys.n.vals  # shape: (n_timesteps, n_spatial_points)
-    C_s_vals = solution.ys.C_s.vals
-    n_points = n_vals.shape[1]
-    z = jnp.linspace(0, bed_props.sorbent_bed_height * 1000, n_points)  # height in mm
-
-    # Convert concentration to RH: C = RH * Psat / (R * T) => RH = C * R * T / Psat
-    RH_vals = C_s_vals * IDEAL_GAS_CONST * env.T / psat_water(env.T)
-
-    fig, (ax1, ax2, ax3) = plt.subplots(3,1)
-
-    for i in range(n_points):
-        ax1.plot(ts / 3600, n_vals[:, i], label=f"z = {z[i]:.3f} mm")
-    ax1.set_ylabel("Sorbent loading (n)")
-    # ax1.legend()
-    ax1.grid(True)
-
-    for i in range(n_points):
-        ax2.plot(ts / 3600, C_s_vals[:, i], label=f"z = {z[i]:.3f} mm")
-    ax2.set_xlabel("Time [h]")
-    ax2.set_ylabel("Concentration C_s")
-    # ax2.legend()
-    ax2.grid(True)
-
-    for i in range(n_points):
-        ax3.plot(ts / 3600, RH_vals[:, i], label=f"z = {z[i]:.3f} mm")
-    ax3.set_xlabel("Time [h]")
-    ax3.set_ylabel("RH")
-    # ax3.legend()
-    ax3.grid(True)
+    ax2.set_ylabel("Error (%)")
+    ax2.legend()
 
     plt.tight_layout()
     plt.show()
@@ -190,8 +151,8 @@ def plot_n_profiles(solution, bed_props: BedProperties, env: EnvironmentalCondit
 
 
 if __name__ == "__main__":
-    # Custom plotting style library (Designed by me)
     JPS.apply()
+    plt.rcParams.update({'font.size': 8})
 
     bed_prop = BedProperties(
         sorbent_bed_height=1e-3,
@@ -203,7 +164,7 @@ if __name__ == "__main__":
     )
 
     env = EnvironmentalConditions(
-        RH=.62,
+        RH=.65,
         T=21
     )
 
@@ -211,14 +172,16 @@ if __name__ == "__main__":
 
     sorbent = SorbentProperties(
         particle_radius=1e-5,
-        particle_density=1100 * .38,
+        particle_density=1100 * .39,
         particle_diffusivity=1e-15,
         isotherm=isotherm,
         env=env,
-        k_sorb_file="utils/D_mu_RH - Copy.txt"
+        k_sorb_file="utils/D_mu_RH.txt"
     )
 
-    solution=run_wrapper(bed_props=bed_prop, env=env, sorbent=sorbent)
+    experiments = read_experiments()
+    final_time = max(exp["ElapsedSeconds"].iloc[-1] for exp in experiments)
 
-    plot_total_n(solution, bed_prop, sorbent)
-    plot_n_profiles(solution, bed_prop, env)
+    solution = run_wrapper(bed_props=bed_prop, env=env, sorbent=sorbent, final_time=final_time)
+
+    plot_model_vs_experiment(solution, experiments, bed_prop, sorbent)
