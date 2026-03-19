@@ -31,6 +31,11 @@ class EnvironmentalConditions(Module):
     def C_amb(self):
         return rh_to_c(self.RH, self.T)
 
+class AirFlow(Module):
+    air_gap_height: Float
+    flow_speed: Float
+    h_m: Float    # mass transfer coefficient [m/s]
+
 
 class BedProperties(Module):
     sorbent_bed_height: Float
@@ -39,18 +44,21 @@ class BedProperties(Module):
 
     pore_diameter: Float
     porosity: Float
+    tau_thermal: Float  # lumped thermal time constant [s]
+    T0: Float           # initial bed temperature [K]
 
-    vapor_diffusivity: Float
-    h_m: Float  # convective mass transfer coefficient [m/s]
+    def vapor_diffusivity(self, T):
+        """D_v(T) = D_ref * (T / T_ref)^1.81, D_ref = 2.42e-5 m²/s at 293 K."""
+        return 2.42e-5 * (T / 293.0) ** 1.81
 
-    @property
-    def knudsen_diffusivity(self):
+    def knudsen_diffusivity(self, T):
         return (self.pore_diameter / 3) * \
-                jnp.sqrt((8*IDEAL_GAS_CONST*(20+273))/(jnp.pi * WATER_MOLAR_MASS))
+                jnp.sqrt((8*IDEAL_GAS_CONST*T)/(jnp.pi * WATER_MOLAR_MASS))
 
-    @property
-    def bed_diffusivity(self):
-        return self.porosity**(3/2) * ((1/self.vapor_diffusivity + 1/self.knudsen_diffusivity) ** (-1))
+    def bed_diffusivity(self, T):
+        D_v = self.vapor_diffusivity(T)
+        D_k = self.knudsen_diffusivity(T)
+        return self.porosity**(3/2) * ((1/D_v + 1/D_k) ** (-1))
 
 class Isotherm(Module):
     C: Array
@@ -80,7 +88,7 @@ class SorbentProperties(Module):
     particle_diffusivity: Float
     particle_density: Float
     isotherm: Module
-    
+
     k_sorb_C_file: Array
     k_sorb_from_file: Array
 
