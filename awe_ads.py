@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import jax
 from equinox import Module
 import matplotlib.pyplot as plt
-from utils.spatial_discretization import SpatialDiscretisation
+from utils.spatial_discretization import SpatialDiscretisation, SpatialDiscretisation2D
 from utils.properties import BedProperties, SorbentProperties, EnvironmentalConditions, Isotherm, rh_to_c, psat_water, IDEAL_GAS_CONST
 import JansPlottingStuff as JPS
 import numpy as np
@@ -14,68 +14,58 @@ from pathlib import Path
 jax.config.update("jax_enable_x64", True)
 
 class BedState(Module):
-    C_s: SpatialDiscretisation
-    n: SpatialDiscretisation
+    C_s: SpatialDiscretisation2D
+    n: SpatialDiscretisation2D
 
 @jax.jit
 def bed_ode(t, y: BedState, args):
     bed_props, sorbent, env = args
 
-    #extracting the parameters
     C_s = y.C_s
     n = y.n
 
-    # Sorbent Properties
-    k_sorb = sorbent.k_sorb
     rho_s = sorbent.particle_density
-
-    # Geometry parameters
     porosity = bed_props.porosity
-
-    # Sorbent Bed Diffusivity
     D_vs = bed_props.bed_diffusivity
 
-
-    # LDF for sorption
+    # LDF sorption (element-wise on 2D array)
     dndt = sorbent.k_sorb_C(C_s.vals) * (sorbent.isotherm(C_s.vals) - n.vals)
-    #dndt = k_sorb * (sorbent.isotherm(C_s.vals) - n.vals)
 
-    # Diffusion in the z direction
-    C_lower = jnp.roll(C_s.vals, shift=1)   # C[i-1]
-    C_upper = jnp.roll(C_s.vals, shift=-1)  # C[i+1]
+    # 2D Laplacian: no-flux on left/right/bottom, fixed on top
+    C = C_s.vals  # (ny, nx)
+    dx, dy = C_s.δx, C_s.δy
 
-    #Top BC (Fixed concentration)
+    # Pad with edge values → implements no-flux ghost nodes on all sides
+    C_padded = jnp.pad(C, ((1, 1), (1, 1)), mode='edge')
+    d2C_dy2 = (C_padded[2:, 1:-1] - 2*C + C_padded[:-2, 1:-1]) / dy**2
+    d2C_dx2 = (C_padded[1:-1, 2:] - 2*C + C_padded[1:-1, :-2]) / dx**2
+    laplacian = d2C_dx2 + d2C_dy2
 
-    laplacian = (C_upper - 2*C_s.vals + C_lower) / C_s.δx**2
-    # No-flux BC at z=0: use ghost node C_ghost = C[0], giving laplacian = (C[1] - C[0]) / dx²
-    laplacian = laplacian.at[0].set((C_upper[0] - C_s.vals[0]) / C_s.δx**2)
-    laplacian = laplacian.at[-1].set(0)  # Will be overridden by dcdt[-1] = 0 anyway
-
-    dcdt =  D_vs*laplacian - (1-porosity)/porosity * rho_s * dndt
-    dcdt = dcdt.at[-1].set(0)
+    dcdt = D_vs * laplacian - (1 - porosity) / porosity * rho_s * dndt
+    dcdt = dcdt.at[0, :].set(0)  # fixed concentration at top row (y = H)
 
     return BedState(
-        C_s=SpatialDiscretisation(C_s.x0, C_s.x_final, dcdt),
-        n=SpatialDiscretisation(n.x0, n.x_final, dndt)
+        C_s=SpatialDiscretisation2D(C_s.x0, C_s.x_final, C_s.y0, C_s.y_final, dcdt),
+        n=SpatialDiscretisation2D(n.x0, n.x_final, n.y0, n.y_final, dndt)
     )
 
 def run_wrapper(bed_props: BedProperties, env: EnvironmentalConditions, sorbent: SorbentProperties, final_time: float):
 
-    #Discretization
-    x0 = 0
-    x_final = bed_props.sorbent_bed_height
-    n = 25
+    # 2D discretization: x (bed length) × y (bed height)
+    nx = 25
+    ny = 25
 
-    #initial conditions
-    C_s_vals = jnp.zeros(n)
-    C_s_vals  = C_s_vals.at[-1].set(env.C_amb)
+    # Initial conditions: zero everywhere, top row (y=H) fixed at C_amb
+    C_s_vals = jnp.zeros((ny, nx))
+    C_s_vals = C_s_vals.at[0, :].set(env.C_amb)
 
     bed_state = BedState(
-        C_s=SpatialDiscretisation(x0, x_final, C_s_vals),
-        n = SpatialDiscretisation.discretise_fn(x0, x_final, n, lambda x: 0)
+        C_s=SpatialDiscretisation2D(0, bed_props.sorbent_bed_length,
+                                     0, bed_props.sorbent_bed_height, C_s_vals),
+        n=SpatialDiscretisation2D(0, bed_props.sorbent_bed_length,
+                                   0, bed_props.sorbent_bed_height, jnp.zeros((ny, nx)))
     )
 
-    # temporal discretization
     t0 = 0
     tf = final_time
 
@@ -84,14 +74,14 @@ def run_wrapper(bed_props: BedProperties, env: EnvironmentalConditions, sorbent:
     saveat = SaveAt(ts=jnp.linspace(0, tf, 10000))
 
     solution = diffeqsolve(
-        terms = ODETerm(bed_ode),
-        solver = Kvaerno5(),
+        terms=ODETerm(bed_ode),
+        solver=Kvaerno5(),
         stepsize_controller=stepsize_controller,
         t0=t0,
         t1=tf,
         dt0=1e-3,
-        y0 = bed_state,
-        args = (bed_props, sorbent, env),
+        y0=bed_state,
+        args=(bed_props, sorbent, env),
         saveat=saveat,
         progress_meter=TqdmProgressMeter(),
         max_steps=int(1e7)
@@ -115,18 +105,25 @@ def read_experiments(folder="exp_data/cleaned"):
 
 def plot_model_vs_experiment(solution, experiments, bed_props: BedProperties, sorbent: SorbentProperties):
     ts = solution.ts
-    n_vals = solution.ys.n.vals  # shape: (n_timesteps, n_spatial_points)
+    n_vals = solution.ys.n.vals  # shape: (n_timesteps, ny, nx)
+    C_s_all = solution.ys.C_s.vals  # shape: (n_timesteps, ny, nx)
 
-    # Calculate total moles from model
-    n_points = n_vals.shape[1]
-    dz = bed_props.sorbent_bed_height / (n_points - 1)
-    dV = bed_props.sorbent_bed_length * bed_props.sorbent_bed_width * dz
+    ny, nx = n_vals.shape[1], n_vals.shape[2]
+    dx = bed_props.sorbent_bed_length / (nx - 1)
+    dy = bed_props.sorbent_bed_height / (ny - 1)
+
+    # Trapezoidal weights: edges 1/2, corners 1/4
+    w = jnp.ones((ny, nx))
+    w = w.at[0, :].multiply(0.5)
+    w = w.at[-1, :].multiply(0.5)
+    w = w.at[:, 0].multiply(0.5)
+    w = w.at[:, -1].multiply(0.5)
+    dV = w * dx * dy * bed_props.sorbent_bed_width
+
     sorbent_mass_per_element = dV * (1 - bed_props.porosity) * sorbent.particle_density
-    adsorbed_moles = jnp.sum(n_vals * sorbent_mass_per_element, axis=1)
+    adsorbed_moles = jnp.sum(n_vals * sorbent_mass_per_element, axis=(1, 2))
 
-    # Vapor stored in pore space of the bed
-    C_s_all = solution.ys.C_s.vals  # shape: (n_timesteps, n_spatial_points)
-    vapor_moles = jnp.sum(C_s_all * bed_props.porosity * dV, axis=1)
+    vapor_moles = jnp.sum(C_s_all * bed_props.porosity * dV, axis=(1, 2))
 
     total_moles = adsorbed_moles + vapor_moles
 
@@ -145,9 +142,7 @@ def plot_model_vs_experiment(solution, experiments, bed_props: BedProperties, so
         pct_error = np.where(mol_exp != 0, (model_interp - mol_exp) / mol_exp * 100, 0)
         ax2.plot(t_exp / 3600, pct_error, label=f"Exp {i+1}")
 
-    adsorbed_moles_arr = np.array(adsorbed_moles)
     ax1.plot(ts_arr / 3600, total_moles_arr, label="Model (total)")
-    ax1.plot(ts_arr / 3600, adsorbed_moles_arr, label="Model (adsorbed)")
     ax1.set_ylabel("Ads Moles")
     ax1.set_title("Model vs Experiment")
     ax1.legend()
@@ -196,12 +191,11 @@ def plot_model_vs_experiment(solution, experiments, bed_props: BedProperties, so
     plt.tight_layout()
 
     # --- Figure 3: Diffusive flux at top boundary ---
-    C_s_vals = np.array(solution.ys.C_s.vals)  # shape: (n_timesteps, n_spatial_points)
-    # One-sided difference: dC/dz at top ≈ (C[-1] - C[-2]) / dz
-    dCdz_top = (C_s_vals[:, -1] - C_s_vals[:, -2]) / dz
-    A_cross = bed_props.sorbent_bed_length * bed_props.sorbent_bed_width
-    # Total diffusive flux into the bed (mol/s): positive = into bed (same sign as adsorption rate)
-    total_flux = bed_props.bed_diffusivity * dCdz_top * A_cross
+    C_s_vals = np.array(C_s_all)  # shape: (n_timesteps, ny, nx)
+    # dC/dy at top row for each x position
+    dCdy_top = (C_s_vals[:, 0, :] - C_s_vals[:, 1, :]) / dy  # (n_timesteps, nx)
+    # Integrate flux over x, times z-depth (bed_width)
+    total_flux = bed_props.bed_diffusivity * np.sum(dCdy_top, axis=1) * dx * bed_props.sorbent_bed_width
 
     # Resample diffusive flux at same 10 min intervals for comparison
     flux_sampled = np.interp(t_sample, ts_arr, total_flux)
@@ -253,7 +247,7 @@ if __name__ == "__main__":
         particle_diffusivity=1e-15,
         isotherm=isotherm,
         env=env,
-        k_sorb_file="utils/D_mu_RH.txt"
+        k_sorb_file="utils/ev15_kinetics.txt"
     )
 
     experiments = read_experiments()

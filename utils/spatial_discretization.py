@@ -45,3 +45,29 @@ class SpatialDiscretisation(eqx.Module):
 
     def __rsub__(self, other):
         return self.binop(other, lambda x, y: y - x)
+
+
+class SpatialDiscretisation2D(eqx.Module):
+    x0: float = eqx.field(static=True)
+    x_final: float = eqx.field(static=True)
+    y0: float = eqx.field(static=True)
+    y_final: float = eqx.field(static=True)
+    vals: Float[Array, "ny nx"]
+
+    @property
+    def δx(self):
+        return (self.x_final - self.x0) / (self.vals.shape[1] - 1)
+
+    @property
+    def δy(self):
+        return (self.y_final - self.y0) / (self.vals.shape[0] - 1)
+
+    @property
+    def trapez_weights(self):
+        """Trapezoidal integration weights: edges 1/2, corners 1/4."""
+        w = jnp.ones_like(self.vals)
+        w = w.at[0, :].multiply(0.5)
+        w = w.at[-1, :].multiply(0.5)
+        w = w.at[:, 0].multiply(0.5)
+        w = w.at[:, -1].multiply(0.5)
+        return w * self.δx * self.δy

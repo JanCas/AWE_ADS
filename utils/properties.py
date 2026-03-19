@@ -41,6 +41,7 @@ class BedProperties(Module):
     porosity: Float
 
     vapor_diffusivity: Float
+    h_m: Float  # convective mass transfer coefficient [m/s]
 
     @property
     def knudsen_diffusivity(self):
@@ -93,7 +94,8 @@ class SorbentProperties(Module):
         data = np.loadtxt(path)
 
         self.k_sorb_C_file = rh_to_c(data[:,0], env.T)
-        self.k_sorb_from_file = data[:, 1] * 1e-4 * 2.5
+        self.k_sorb_from_file = data[:, 1]
+        print(self.k_sorb_C_file)
         print(self.k_sorb_from_file)
 
     @property
