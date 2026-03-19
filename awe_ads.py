@@ -8,6 +8,7 @@ from utils.spatial_discretization import SpatialDiscretisation
 from utils.properties import BedProperties, SorbentProperties, EnvironmentalConditions, Isotherm, rh_to_c, psat_water, IDEAL_GAS_CONST
 import JansPlottingStuff as JPS
 import numpy as np
+from scipy.signal import savgol_filter
 from pathlib import Path
 
 jax.config.update("jax_enable_x64", True)
@@ -121,22 +122,32 @@ def plot_model_vs_experiment(solution, experiments, bed_props: BedProperties, so
     dz = bed_props.sorbent_bed_height / (n_points - 1)
     dV = bed_props.sorbent_bed_length * bed_props.sorbent_bed_width * dz
     sorbent_mass_per_element = dV * (1 - bed_props.porosity) * sorbent.particle_density
-    total_moles = jnp.sum(n_vals * sorbent_mass_per_element, axis=1)
+    adsorbed_moles = jnp.sum(n_vals * sorbent_mass_per_element, axis=1)
 
+    # Vapor stored in pore space of the bed
+    C_s_all = solution.ys.C_s.vals  # shape: (n_timesteps, n_spatial_points)
+    vapor_moles = jnp.sum(C_s_all * bed_props.porosity * dV, axis=1)
+
+    total_moles = adsorbed_moles + vapor_moles
+
+    ts_arr = np.array(ts)
+    total_moles_arr = np.array(total_moles)
+
+    # --- Figure 1: Moles comparison ---
     fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True)
 
-    # Plot individual experiments and their pct error vs model
     for i, exp in enumerate(experiments):
         t_exp = exp["ElapsedSeconds"].values
         mol_exp = exp["mol_ads"].values
         ax1.plot(t_exp / 3600, mol_exp, label=f"Exp {i+1}")
 
-        model_interp = np.interp(t_exp, np.array(ts), np.array(total_moles))
+        model_interp = np.interp(t_exp, ts_arr, total_moles_arr)
         pct_error = np.where(mol_exp != 0, (model_interp - mol_exp) / mol_exp * 100, 0)
         ax2.plot(t_exp / 3600, pct_error, label=f"Exp {i+1}")
 
-    # Plot model
-    ax1.plot(np.array(ts) / 3600, np.array(total_moles), label="Model")
+    adsorbed_moles_arr = np.array(adsorbed_moles)
+    ax1.plot(ts_arr / 3600, total_moles_arr, label="Model (total)")
+    ax1.plot(ts_arr / 3600, adsorbed_moles_arr, label="Model (adsorbed)")
     ax1.set_ylabel("Ads Moles")
     ax1.set_title("Model vs Experiment")
     ax1.legend()
@@ -145,6 +156,72 @@ def plot_model_vs_experiment(solution, experiments, bed_props: BedProperties, so
     ax2.set_ylabel("Error (%)")
     ax2.legend()
 
+    plt.tight_layout()
+
+    # --- Figure 2: Rate of adsorption comparison (5 min sampling) ---
+    dt_sample = 120  # 2 minutes in seconds
+    t_max = ts_arr[-1]
+    t_sample = np.arange(0, t_max, dt_sample)
+
+    # Model rate at sampled points
+    model_moles_sampled = np.interp(t_sample, ts_arr, total_moles_arr)
+    model_rate = np.diff(model_moles_sampled) / dt_sample
+    t_rate_sample = (t_sample[:-1] + t_sample[1:]) / 2
+
+    fig2, (ax3, ax4) = plt.subplots(2, 1, sharex=True)
+
+    for i, exp in enumerate(experiments):
+        t_exp = exp["ElapsedSeconds"].values
+        mol_exp = exp["mol_ads"].values
+
+        # Resample experimental data at 5 min intervals
+        exp_moles_sampled = np.interp(t_sample, t_exp, mol_exp)
+        exp_rate = np.diff(exp_moles_sampled) / dt_sample
+
+        ax3.plot(t_rate_sample / 3600, exp_rate, label=f"Exp {i+1}")
+
+        # Rate error
+        rate_error = np.where(exp_rate != 0, (model_rate[:len(exp_rate)] - exp_rate) / exp_rate * 100, 0)
+        ax4.plot(t_rate_sample[:len(rate_error)] / 3600, rate_error, label=f"Exp {i+1}")
+
+    ax3.plot(t_rate_sample / 3600, model_rate, label="Model")
+    ax3.set_ylabel("Rate [mol/s]")
+    ax3.set_title("Rate of Adsorption (2 min sampling)")
+    ax3.legend()
+
+    ax4.set_xlabel("Time [h]")
+    ax4.set_ylabel("Rate Error (%)")
+    ax4.legend()
+
+    plt.tight_layout()
+
+    # --- Figure 3: Diffusive flux at top boundary ---
+    C_s_vals = np.array(solution.ys.C_s.vals)  # shape: (n_timesteps, n_spatial_points)
+    # One-sided difference: dC/dz at top ≈ (C[-1] - C[-2]) / dz
+    dCdz_top = (C_s_vals[:, -1] - C_s_vals[:, -2]) / dz
+    A_cross = bed_props.sorbent_bed_length * bed_props.sorbent_bed_width
+    # Total diffusive flux into the bed (mol/s): positive = into bed (same sign as adsorption rate)
+    total_flux = bed_props.bed_diffusivity * dCdz_top * A_cross
+
+    # Resample diffusive flux at same 10 min intervals for comparison
+    flux_sampled = np.interp(t_sample, ts_arr, total_flux)
+    flux_rate = (flux_sampled[:-1] + flux_sampled[1:]) / 2  # avg flux over each interval
+
+    fig3, ax5 = plt.subplots()
+
+    ax5.plot(t_rate_sample / 3600, model_rate, label="Model Ads Rate")
+    ax5.plot(t_rate_sample / 3600, flux_rate, label="Diffusive Flux")
+    for i, exp in enumerate(experiments):
+        t_exp = exp["ElapsedSeconds"].values
+        mol_exp = exp["mol_ads"].values
+        exp_moles_sampled = np.interp(t_sample, t_exp, mol_exp)
+        exp_rate = np.diff(exp_moles_sampled) / dt_sample
+        ax5.plot(t_rate_sample / 3600, exp_rate, label=f"Exp {i+1} Rate")
+
+    ax5.set_xlabel("Time [h]")
+    ax5.set_ylabel("Rate [mol/s]")
+    ax5.set_title("Adsorption Rate vs Diffusive Flux")
+    ax5.legend()
     plt.tight_layout()
     plt.show()
 
