@@ -7,25 +7,23 @@ from utils.properties import BedProperties, SorbentProperties, EnvironmentalCond
 
 def plot_model_vs_experiment(solution, experiments, bed_props: BedProperties, sorbent: SorbentProperties, env: EnvironmentalConditions):
     ts = solution.ts
-    n_vals = solution.ys.n.vals  # shape: (n_timesteps, ny, nx)
-    C_s_all = solution.ys.C_s.vals  # shape: (n_timesteps, ny, nx)
+    n_vals = solution.ys.n.vals  # shape: (n_timesteps, ny)
+    C_s_all = solution.ys.C_s.vals  # shape: (n_timesteps, ny)
 
-    ny, nx = n_vals.shape[1], n_vals.shape[2]
-    dx = bed_props.sorbent_bed_length / (nx - 1)
+    ny = n_vals.shape[1]
     dy = bed_props.sorbent_bed_height / (ny - 1)
 
-    # Trapezoidal weights: edges 1/2, corners 1/4
-    w = jnp.ones((ny, nx))
-    w = w.at[0, :].multiply(0.5)
-    w = w.at[-1, :].multiply(0.5)
-    w = w.at[:, 0].multiply(0.5)
-    w = w.at[:, -1].multiply(0.5)
-    dV = w * dx * dy * bed_props.sorbent_bed_width
+    # Trapezoidal weights along y: endpoints get 1/2
+    w = jnp.ones(ny)
+    w = w.at[0].multiply(0.5)
+    w = w.at[-1].multiply(0.5)
+    # Volume element: dy * bed_length * bed_width (uniform cross-section)
+    dV = w * dy * bed_props.sorbent_bed_length * bed_props.sorbent_bed_width
 
     sorbent_mass_per_element = dV * (1 - bed_props.porosity) * sorbent.particle_density
-    adsorbed_moles = jnp.sum(n_vals * sorbent_mass_per_element, axis=(1, 2))
+    adsorbed_moles = jnp.sum(n_vals * sorbent_mass_per_element, axis=1)
 
-    vapor_moles = jnp.sum(C_s_all * bed_props.porosity * dV, axis=(1, 2))
+    vapor_moles = jnp.sum(C_s_all * bed_props.porosity * dV, axis=1)
 
     total_moles = adsorbed_moles + vapor_moles
 
@@ -55,7 +53,7 @@ def plot_model_vs_experiment(solution, experiments, bed_props: BedProperties, so
 
     plt.tight_layout()
 
-    # --- Figure 2: Rate of adsorption comparison (5 min sampling) ---
+    # --- Figure 2: Rate of adsorption comparison (2 min sampling) ---
     dt_sample = 120  # 2 minutes in seconds
     t_max = ts_arr[-1]
     t_sample = np.arange(0, t_max, dt_sample)
@@ -71,13 +69,11 @@ def plot_model_vs_experiment(solution, experiments, bed_props: BedProperties, so
         t_exp = exp["ElapsedSeconds"].values
         mol_exp = exp["mol_ads"].values
 
-        # Resample experimental data at 5 min intervals
         exp_moles_sampled = np.interp(t_sample, t_exp, mol_exp)
         exp_rate = np.diff(exp_moles_sampled) / dt_sample
 
         ax3.plot(t_rate_sample / 3600, exp_rate, label=f"Exp {i+1}")
 
-        # Rate error
         rate_error = np.where(exp_rate != 0, (model_rate[:len(exp_rate)] - exp_rate) / exp_rate * 100, 0)
         ax4.plot(t_rate_sample[:len(rate_error)] / 3600, rate_error, label=f"Exp {i+1}")
 
@@ -93,15 +89,15 @@ def plot_model_vs_experiment(solution, experiments, bed_props: BedProperties, so
     plt.tight_layout()
 
     # --- Figure 3: Diffusive flux at top boundary ---
-    C_s_vals = np.array(C_s_all)  # shape: (n_timesteps, ny, nx)
-    # dC/dy at top row for each x position
-    dCdy_top = (C_s_vals[:, 0, :] - C_s_vals[:, 1, :]) / dy  # (n_timesteps, nx)
-    # Integrate flux over x, times z-depth (bed_width)
-    total_flux = bed_props.bed_diffusivity(env.T) * np.sum(dCdy_top, axis=1) * dx * bed_props.sorbent_bed_width
+    C_s_vals = np.array(C_s_all)  # shape: (n_timesteps, ny)
+    # dC/dy at top: (C[0] - C[1]) / dy  (outward gradient)
+    dCdy_top = (C_s_vals[:, 0] - C_s_vals[:, 1]) / dy  # (n_timesteps,)
+    # Total flux: D * dC/dy * cross-sectional area
+    cross_section = bed_props.sorbent_bed_length * bed_props.sorbent_bed_width
+    total_flux = bed_props.bed_diffusivity(env.T) * dCdy_top * cross_section
 
-    # Resample diffusive flux at same 10 min intervals for comparison
     flux_sampled = np.interp(t_sample, ts_arr, total_flux)
-    flux_rate = (flux_sampled[:-1] + flux_sampled[1:]) / 2  # avg flux over each interval
+    flux_rate = (flux_sampled[:-1] + flux_sampled[1:]) / 2
 
     fig3, ax5 = plt.subplots()
 
@@ -136,61 +132,43 @@ def plot_temperature(solution):
 
 def animate_bed(solution, bed_props: BedProperties, n_frames=200):
     ts = np.array(solution.ts)
-    C_s_all = np.array(solution.ys.C_s.vals)  # (n_timesteps, ny, nx)
-    n_all = np.array(solution.ys.n.vals)
-    C_air_all = np.array(solution.ys.C_air.vals)  # (n_timesteps, nx)
+    C_s_all = np.array(solution.ys.C_s.vals)  # (n_timesteps, ny)
+    n_all = np.array(solution.ys.n.vals)       # (n_timesteps, ny)
+
+    ny = C_s_all.shape[1]
+    y_arr = np.linspace(0, bed_props.sorbent_bed_height * 1e3, ny)  # mm
 
     # Subsample frames evenly across time
     frame_idx = np.linspace(0, len(ts) - 1, n_frames, dtype=int)
 
-    x_extent = [0, bed_props.sorbent_bed_length * 1e3]  # mm
-    y_extent = [0, bed_props.sorbent_bed_height * 1e3]   # mm
-    nx = C_s_all.shape[2]
-    x_arr = np.linspace(x_extent[0], x_extent[1], nx)
+    fig, (ax_c, ax_n) = plt.subplots(1, 2, figsize=(10, 5))
 
-    fig, (ax_air, ax_c, ax_n) = plt.subplots(3, 1, figsize=(12, 6),
-                                              height_ratios=[1, 1, 1])
-
-    # Fixed color/axis limits across the whole animation
+    # Fixed axis limits
     c_vmin, c_vmax = C_s_all.min(), C_s_all.max()
     n_vmin, n_vmax = n_all.min(), n_all.max()
-    air_vmin, air_vmax = C_air_all.min(), C_air_all.max()
 
-    extent = [x_extent[0], x_extent[1], y_extent[0], y_extent[1]]
+    line_c, = ax_c.plot(y_arr, C_s_all[0], color='tab:blue')
+    ax_c.set_xlim(y_arr[0], y_arr[-1])
+    ax_c.set_ylim(c_vmin, c_vmax * 1.05 if c_vmax > 0 else 1)
+    ax_c.set_xlabel('y [mm]')
+    ax_c.set_ylabel(r'$C_s$ [mol/m³]')
+    ax_c.set_title('Gas-phase concentration')
 
-    # Air channel: 1D line plot
-    line_air, = ax_air.plot(x_arr, C_air_all[0], color='tab:blue')
-    ax_air.set_xlim(x_extent)
-    ax_air.set_ylim(air_vmin, air_vmax * 1.05)
-    ax_air.set_ylabel(r'$C_{air}$ [mol/m³]')
-    ax_air.set_xlabel('x [mm]')
-    ax_air.set_title('Air channel concentration')
-
-    # Bed C_s colormap
-    im_c = ax_c.imshow(C_s_all[0], aspect='auto', origin='upper',
-                        extent=extent,
-                        vmin=c_vmin, vmax=c_vmax, cmap='viridis')
-    fig.colorbar(im_c, ax=ax_c, label=r'$C_s$ [mol/m³]', location='right', shrink=0.9)
-    ax_c.set_xlabel('x [mm]')
-    ax_c.set_ylabel('y [mm]')
-
-    # Bed n colormap
-    im_n = ax_n.imshow(n_all[0], aspect='auto', origin='upper',
-                        extent=extent,
-                        vmin=n_vmin, vmax=n_vmax, cmap='inferno')
-    fig.colorbar(im_n, ax=ax_n, label=r'$n$ [mol/kg]', location='right', shrink=0.9)
-    ax_n.set_xlabel('x [mm]')
-    ax_n.set_ylabel('y [mm]')
+    line_n, = ax_n.plot(y_arr, n_all[0], color='tab:orange')
+    ax_n.set_xlim(y_arr[0], y_arr[-1])
+    ax_n.set_ylim(n_vmin, n_vmax * 1.05 if n_vmax > 0 else 1)
+    ax_n.set_xlabel('y [mm]')
+    ax_n.set_ylabel(r'$n$ [mol/kg]')
+    ax_n.set_title('Adsorbed amount')
 
     title = fig.suptitle(f't = {ts[0]:.1f} s')
 
     def update(frame):
         idx = frame_idx[frame]
-        line_air.set_ydata(C_air_all[idx])
-        im_c.set_data(C_s_all[idx])
-        im_n.set_data(n_all[idx])
+        line_c.set_ydata(C_s_all[idx])
+        line_n.set_ydata(n_all[idx])
         title.set_text(f't = {ts[idx]:.1f} s')
-        return line_air, im_c, im_n, title
+        return line_c, line_n, title
 
     anim = FuncAnimation(fig, update, frames=n_frames, interval=50, blit=True)
     plt.tight_layout()
