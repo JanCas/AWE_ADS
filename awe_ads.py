@@ -25,7 +25,7 @@ def bed_ode(t, y: BedState, args):
     n = y.n
     C_air = y.C_air.vals  # (nx,)
 
-    T = y.T
+    T = 180+273
     rho_s = sorbent.particle_density
     porosity = bed_props.porosity
     D_vs = bed_props.bed_diffusivity(T)
