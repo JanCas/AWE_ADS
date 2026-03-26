@@ -28,6 +28,8 @@ def bed_ode(t, y: BedState, args):
     rho_s = sorbent.particle_density
     porosity = bed_props.porosity
     D_vs = bed_props.bed_diffusivity(T)
+    
+    #jax.debug.print("time {t} | D_vs {d} | T {T}", t=t, d=D_vs, T=T)
 
     # LDF sorption
     dndt = sorbent.k_sorb_C(C) * (sorbent.isotherm(C) - n.vals)
