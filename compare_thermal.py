@@ -36,9 +36,9 @@ common_bed = dict(
 
 cases = {
     "Isothermal 21°C": BedProperties(**common_bed, tau_thermal=1e6, T0=21 + 273),
-    r"150°C, $\tau$=5 min": BedProperties(**common_bed, tau_thermal=5 * 60, T0=150 + 273),
-    r"150°C, $\tau$=10 min": BedProperties(**common_bed, tau_thermal=10 * 60, T0=150 + 273),
-    r"150°C, $\tau$=15 min": BedProperties(**common_bed, tau_thermal=15 * 60, T0=150 + 273),
+    r"70°C, $\tau$=30 s": BedProperties(**common_bed, tau_thermal=30, T0=70 + 273),
+    r"70°C, $\tau$=1 min": BedProperties(**common_bed, tau_thermal=60, T0=70 + 273),
+    r"70°C, $\tau$=2 min": BedProperties(**common_bed, tau_thermal=2 * 60, T0=70 + 273),
 }
 
 # --- Run all cases ---
@@ -71,8 +71,8 @@ ax_mol, ax_err, ax_temp = axes
 
 colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
-# Experimental data (first experiment only)
-exp = experiments[0]
+# Experimental data (second experiment)
+exp = experiments[1]
 t_exp = exp["ElapsedSeconds"].values
 mol_exp = exp["mol_ads"].values
 ax_mol.plot(t_exp / 3600, mol_exp, '--', color='grey', alpha=0.6, label="Experiment")

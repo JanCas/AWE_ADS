@@ -31,8 +31,8 @@ def bed_ode(t, y: BedState, args):
     
     #jax.debug.print("time {t} | D_vs {d} | T {T}", t=t, d=D_vs, T=T)
 
-    # LDF sorption
-    dndt = sorbent.k_sorb_C(C) * (sorbent.isotherm(C) - n.vals)
+    # LDF sorption (temperature-adjusted k)
+    dndt = sorbent.k_sorb_C(C, T) * (sorbent.isotherm(C) - n.vals)
 
     # --- 1D diffusion in y with constant C at top boundary ---
     dy = C_s.δx  # δx is the grid spacing for 1D SpatialDiscretisation

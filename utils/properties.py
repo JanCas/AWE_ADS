@@ -10,8 +10,19 @@ from CoolProp.CoolProp import PropsSI
 def psat_water(T: float) -> float:
     return PropsSI("P", "T", T, "Q", 0, "Water")
 
+def psat_water_jax(T):
+    """Antoine equation for water saturation pressure [Pa]. JAX-compatible."""
+    # Antoine constants (NIST, valid ~255-373 K), gives pressure in bar
+    A, B, C = 5.40221, 1838.675, -31.737
+    psat_bar = 10.0 ** (A - B / (T + C))
+    return psat_bar * 1e5  # bar -> Pa
+
 def rh_to_c(rh, T):
     return rh*psat_water(T)/(IDEAL_GAS_CONST*T)
+
+def c_to_rh_jax(C, T):
+    """Convert molar concentration [mol/m³] to fractional RH. JAX-compatible."""
+    return C * IDEAL_GAS_CONST * T / psat_water_jax(T)
 
 IDEAL_GAS_CONST = 8.314 #J/molK
 WATER_MOLAR_MASS = .018 # kg/mol
@@ -89,10 +100,20 @@ class SorbentProperties(Module):
     particle_density: Float
     isotherm: Module
 
+    k_sorb_RH_file: Array   # RH values from file (fractional)
     k_sorb_C_file: Array
     k_sorb_from_file: Array
+    T_ref: Float             # reference temperature for k data [K]
 
-    def __init__(self, particle_radius, particle_diffusivity, particle_density, isotherm, k_sorb_file, env):
+    # Temperature adjustment parameters
+    E_a: Float               # Arrhenius activation energy [J/mol]
+    RH_deliq: Float          # deliquescence RH (fractional)
+    blend_width: Float       # sigmoid transition width (fractional RH)
+    A_visc: Float            # viscosity pre-exponential [Pa·s]
+    B_visc: Float            # viscosity activation temperature [K]
+
+    def __init__(self, particle_radius, particle_diffusivity, particle_density, isotherm, k_sorb_file, env,
+                 E_a=40_000.0, RH_deliq=0.42, blend_width=0.10, A_visc=1.0e-6, B_visc=2500.0):
         self.particle_radius = particle_radius
         self.particle_diffusivity = particle_diffusivity
         self.particle_density = particle_density
@@ -101,17 +122,45 @@ class SorbentProperties(Module):
         path = Path(k_sorb_file)
         data = np.loadtxt(path)
 
+        self.k_sorb_RH_file = jnp.array(data[:, 0])  # fractional RH
         self.k_sorb_C_file = rh_to_c(data[:,0], env.T)
         self.k_sorb_from_file = data[:, 1]
-        print(self.k_sorb_C_file)
-        print(self.k_sorb_from_file)
+        self.T_ref = env.T
+
+        self.E_a = E_a
+        self.RH_deliq = RH_deliq
+        self.blend_width = blend_width
+        self.A_visc = A_visc
+        self.B_visc = B_visc
 
     @property
     def k_sorb(self) -> Float:
         return 15 * self.particle_diffusivity / (self.particle_radius**2)
 
-    def k_sorb_C(self, concentration) -> Float:
-        return jnp.interp(concentration, self.k_sorb_C_file, self.k_sorb_from_file)
+    def k_sorb_C(self, concentration, T=None) -> Float:
+        """LDF rate constant. If T is provided, applies temperature adjustment."""
+        k_ref = jnp.interp(concentration, self.k_sorb_C_file, self.k_sorb_from_file)
+        if T is None:
+            return k_ref
+        return self._k_temperature_adjusted(k_ref, concentration, T)
+
+    def _k_temperature_adjusted(self, k_ref, concentration, T):
+        R = IDEAL_GAS_CONST
+        T_ref = self.T_ref
+
+        # Arrhenius regime (hydrate, low RH)
+        k_hyd = k_ref * jnp.exp(-self.E_a / R * (1.0 / T - 1.0 / T_ref))
+
+        # Stokes-Einstein regime (liquid, high RH)
+        mu_ref = self.A_visc * jnp.exp(self.B_visc / T_ref)
+        mu_T = self.A_visc * jnp.exp(self.B_visc / T)
+        k_liq = k_ref * (T / T_ref) * (mu_ref / mu_T)
+
+        # Blend based on local RH
+        RH = c_to_rh_jax(concentration, T)
+        alpha = 1.0 / (1.0 + jnp.exp(-(RH - self.RH_deliq) / (self.blend_width / 4.0)))
+
+        return (1.0 - alpha) * k_hyd + alpha * k_liq
 
     def __call__(self, concentration):
         return self.isotherm(concentration)
