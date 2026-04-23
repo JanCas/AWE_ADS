@@ -92,10 +92,41 @@ _KAN_K = jnp.array([
     0.0055, 0.0052, 0.0048, 0.0043, 0.0038, 0.0032, 0.0027, 0.0019,
     0.0013, 0.0010, 0.0008, 0.0006, 0.0004, 0.0003, 0.0002
 ])
+
+# Crystal LiCl@Ev15-35 k(n) from LDF fit, mapped to crystal isotherm [1/s]
+_CRYSTAL_N = jnp.array([
+    0.3083, 0.5466, 0.6878, 0.8393, 1.0092,
+])
+_CRYSTAL_K = jnp.array([
+    0.000139, 0.000257, 0.000267, 0.000286, 0.000242,
+])
+# k vs pure crystal loading (midpoint of each RH step)
+q_crystal = jnp.array([0.0692, 0.2303, 0.4002, 0.5194, 0.5878, 0.6509, \
+             0.7238, 0.7918, 0.8704, 0.9647, 1.0560, 1.1543, \
+             1.2719, 1.4336, 1.6468, 1.9515])
+
+k_values = jnp.array([0.0008236, 0.0075672, 0.0092382, 0.0078975, 0.0071357, \
+            0.0069457, 0.0057886, 0.0049217, 0.0042146, 0.0026883, \
+            0.0020750, 0.0019476, 0.0015934, 0.0011755, 0.0007616, \
+            0.0005702])
+
+# DVS-extracted k(n) curve [1/s] (material basis, g H2O / g EV-15, adsorption)
+_DVS_N = jnp.array([
+    0.052, 0.223, 0.408, 0.530, 0.590, 0.644, 0.731, 0.796,
+    0.878, 0.967, 1.056, 1.151, 1.263, 1.423, 1.650, 1.926
+])
+_DVS_K = jnp.array([
+    0.0016, 0.0040, 0.0045, 0.0039, 0.0036, 0.0033, 0.0027, 0.0023,
+    0.0019, 0.0015, 0.0010, 0.0007, 0.0007, 0.0005, 0.0004, 0.0003
+])
+
 # Convert n breakpoints from g/g to mol/kg
 _KAN_N_MOL_KG = _KAN_N / WATER_MOLAR_MASS
+_CRYSTAL_N_KG = _CRYSTAL_N / WATER_MOLAR_MASS
+q_crystal_KG = q_crystal / WATER_MOLAR_MASS
+_DVS_N_KG = _DVS_N / WATER_MOLAR_MASS
 
-DEVICE_SCALE = 0.1  # DVS-to-device correction factor
+DEVICE_SCALE = .1  # DVS-to-device correction factor
 
 
 class SorbentProperties(Module):
@@ -108,8 +139,7 @@ class SorbentProperties(Module):
 
     def k_ldf(self, n):
         """KAN literature k(n) via linear interpolation [1/s], device-scaled."""
-        return jnp.interp(n, _KAN_N_MOL_KG, _KAN_K) * DEVICE_SCALE
-
+        return jnp.interp(n, _DVS_N_KG, _DVS_K) * .1# * 8 /15 * 25**2 / 90**2
     def __call__(self, concentration):
         return self.isotherm(concentration)
 
